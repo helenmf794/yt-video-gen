@@ -1,0 +1,60 @@
+name: Generate video
+
+on:
+  workflow_dispatch:
+    inputs:
+      topic:
+        description: "Video topic (English)"
+        required: true
+        type: string
+      minutes:
+        description: "Length in minutes"
+        required: true
+        default: "10"
+        type: string
+      voice:
+        description: "TTS voice"
+        required: true
+        default: "en-US-AndrewNeural"
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg jq
+          pip install -r requirements.txt
+
+      - name: Generate video
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+          TOPIC: ${{ inputs.topic }}
+          MINUTES: ${{ inputs.minutes }}
+          VOICE: ${{ inputs.voice }}
+        run: python generate_video.py "$TOPIC" --minutes "$MINUTES" --voice "$VOICE"
+
+      - name: Publish as release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DIR=$(find output -mindepth 1 -maxdepth 1 -type d | head -n 1)
+          TITLE=$(jq -r .title "$DIR/metadata.json")
+          gh release create "video-${{ github.run_id }}" \
+            "$DIR/video.mp4" "$DIR/metadata.json" \
+            --title "$TITLE" \
+            --notes "Topic: ${{ inputs.topic }}"
