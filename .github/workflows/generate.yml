@@ -17,6 +17,12 @@ on:
         required: true
         default: "en-US-AndrewNeural"
         type: string
+      images:
+        description: "Images: mix (AI + real photos), ai, or photos"
+        required: true
+        default: "mix"
+        type: choice
+        options: [mix, ai, photos]
 
 permissions:
   contents: write
@@ -35,7 +41,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg jq
+          sudo apt-get install -y ffmpeg jq fonts-dejavu-core
           pip install -r requirements.txt
 
       - name: Generate video
@@ -46,7 +52,8 @@ jobs:
           TOPIC: ${{ inputs.topic }}
           MINUTES: ${{ inputs.minutes }}
           VOICE: ${{ inputs.voice }}
-        run: python generate_video.py "$TOPIC" --minutes "$MINUTES" --voice "$VOICE"
+          IMAGES: ${{ inputs.images }}
+        run: python generate_video.py "$TOPIC" --minutes "$MINUTES" --voice "$VOICE" --images "$IMAGES"
 
       - name: Publish as release
         env:
