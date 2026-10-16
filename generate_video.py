@@ -15,6 +15,7 @@ Optional: put a royalty-free `music.mp3` next to this script for background musi
 """
 import argparse
 import asyncio
+import base64
 import json
 import os
 import random
@@ -80,6 +81,22 @@ STYLES = {
         tone="warm, vivid, entertaining storytelling",
         bg="0x0F766E", fg="white", accent="0xF59E0B"),
 }
+_EXTRA = {
+    "documentary": ("Cinematic documentary photograph",
+                    "vivid, concrete and photographable (setting, subject, lighting)"),
+    "stickman": ("Hand-drawn stick figure cartoon doodle, thick black lines on a plain white background",
+                 "a SIMPLE doodle: what the stick figure is doing plus 1-3 simple objects; no photographic detail, "
+                 "no lighting, camera or realism words"),
+    "whiteboard": ("Hand-drawn marker sketch on a whiteboard, simple black line drawing",
+                   "a SIMPLE diagram or sketch with 1-3 icons or objects; no photographic detail or realism words"),
+    "cartoon-kids": ("Cute colorful children's picture-book cartoon illustration",
+                     "a simple, cheerful scene with 1-3 friendly characters or objects; no scary or realistic detail"),
+    "anime": ("Anime illustration", "a dramatic scene with the character and one clear background element"),
+    "pixel-art": ("16-bit pixel art scene", "a simple game-like scene with 1-3 clear objects or characters"),
+    "3d-cartoon": ("3D animated cartoon render", "a clear scene with the character and 1-2 props"),
+}
+for _k, (_pre, _hint) in _EXTRA.items():
+    STYLES[_k]["prefix"], STYLES[_k]["scene_hint"] = _pre, _hint
 UA = {"User-Agent": "yt-video-gen/1.0 (personal educational project)"}
 GEMINI_MODELS = [m.strip() for m in os.getenv(
     "GEMINI_MODELS", "gemini-3.8-flash,gemini-3.8-flash-lite,gemini-flash-latest"
@@ -160,6 +177,9 @@ The sections must tell a coherent story: strong hook, logical progression, satis
     sections = outline["sections"][:minutes]
     scenes = []
     prev = "None"
+    look = ENGINE["look"].strip()
+    look_rule = (f"\n  The creator's visual world/atmosphere: \"{look}\". Keep every scene consistent with it."
+                 if look else "")
     for idx, sec in enumerate(sections):
         print(f"Writing section {idx + 1}/{len(sections)}: {sec['heading']}")
         role = ""
@@ -178,8 +198,8 @@ Rules:
   flowing continuously from one scene to the next.
 - image_query: 2-4 English words for a photo search. It MUST include the main subject word of the topic so
   results stay on-topic (e.g. "ottoman empire coffeehouse"), concrete and photographable.
-- ai_prompt: vivid 15-25 word description of the exact scene for an AI image generator. Describe the scene only
-  (art style is added automatically). No text or letters in the image, no named real people.
+- ai_prompt: 12-22 word description of the exact scene for an AI image generator: {st['scene_hint']}.
+  Describe the scene only (art style is added automatically). No text or letters in the image, no named real people.{look_rule}
 - on_screen: 2-4 words to show as a big on-screen callout (a key term, date or number from this scene),
   or "" if nothing deserves highlighting. Use it in about half of the scenes.""")
         for s in data["scenes"]:
@@ -318,7 +338,10 @@ def src_ai(prompt, dest, used, patient=False):
         try:
             seed = AI_STATE["seed"] or random.randint(1, 999999)
             url = (f"https://image.pollinations.ai/prompt/{urllib.parse.quote(prompt)}"
-                   f"?width={W}&height={H}&nologo=true&seed={seed + attempt}")
+                   f"?width={W}&height={H}&model=flux&enhance=false&nologo=true&seed={seed + attempt}")
+            if AI_STATE.setdefault("logged", 0) < 3:
+                AI_STATE["logged"] += 1
+                print("  AI prompt:", prompt)
             r = requests.get(url, headers=UA, timeout=120)
             if r.status_code == 200 and valid_image(r.content):
                 dest.write_bytes(r.content)
@@ -336,10 +359,156 @@ def src_ai(prompt, dest, used, patient=False):
 
 
 def full_prompt(s, st, character):
-    p = (s.get("ai_prompt") or s["image_query"]).rstrip(". ")
+    scene = " ".join((s.get("ai_prompt") or s["image_query"]).replace("\n", " ").split()[:28]).rstrip(". ")
+    look = ENGINE["look"].strip()
+    parts = [f"{st['prefix']}" + (f", {look}" if look else "") + f": {scene}"]
     if character:
-        p += f". Recurring main character: {character}"
-    return f"{p}. Art style: {st['suffix']}"
+        parts.append(f"Recurring main character: {' '.join(character.split()[:20])}")
+    parts.append(st["suffix"])
+    return ". ".join(parts)
+
+
+GEMINI_IMG = {"models": None, "fails": 0, "off": False}
+ENGINE = {"mode": "auto", "look": ""}   # set in main(): ai engine + creator's visual "look"
+
+
+def gemini_image_models(key):
+    """Image-capable models this key can see: Gemini image models first, then Imagen."""
+    if GEMINI_IMG["models"] is not None:
+        return GEMINI_IMG["models"]
+    gen, pred = [], []
+    try:
+        r = requests.get("https://generativelanguage.googleapis.com/v1beta/models",
+                         params={"key": key, "pageSize": 200}, timeout=30)
+        for m in r.json().get("models", []):
+            name = m["name"].split("/", 1)[1]
+            methods = m.get("supportedGenerationMethods", [])
+            if "image" in name and "generateContent" in methods and "imagen" not in name:
+                gen.append(("gen", name))
+            elif "imagen" in name and "predict" in methods:
+                pred.append(("predict", name))
+    except Exception as e:
+        print("  Gemini image: could not list models:", e)
+    gen.sort(key=lambda x: ("flash" not in x[1], x[1]))
+    GEMINI_IMG["models"] = (gen + pred)[:3]
+    print("  Gemini image models:", [n for _, n in GEMINI_IMG["models"]])
+    return GEMINI_IMG["models"]
+
+
+def _extract_b64_image(js):
+    import base64
+    for cand in js.get("candidates", []):
+        for part in (cand.get("content") or {}).get("parts", []):
+            inl = part.get("inlineData") or part.get("inline_data")
+            if inl and inl.get("data"):
+                b = base64.b64decode(inl["data"])
+                if valid_image(b):
+                    return b
+    for pr in js.get("predictions", []):
+        if pr.get("bytesBase64Encoded"):
+            b = base64.b64decode(pr["bytesBase64Encoded"])
+            if valid_image(b):
+                return b
+    return None
+
+
+def src_gemini_image(prompt, dest):
+    """Let Gemini itself draw the scene (uses the same API key). Switches itself off if the
+    free tier has no image quota, so the video falls back to the default generator."""
+    if GEMINI_IMG["off"]:
+        return False
+    key = os.environ.get("GEMINI_API_KEY")
+    models = gemini_image_models(key) if key else []
+    if not models:
+        GEMINI_IMG["off"] = True
+        print("  Gemini image: no image model available -> using fallback generator")
+        return False
+    for kind, name in models:
+        base = f"https://generativelanguage.googleapis.com/v1beta/models/{name}"
+        if kind == "gen":
+            bodies = [
+                {"contents": [{"parts": [{"text": prompt + " Wide 16:9 landscape composition."}]}],
+                 "generationConfig": {"responseModalities": ["TEXT", "IMAGE"], "imageConfig": {"aspectRatio": "16:9"}}},
+                {"contents": [{"parts": [{"text": prompt + " Wide 16:9 landscape composition."}]}],
+                 "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]}},
+            ]
+            url = f"{base}:generateContent?key={key}"
+        else:
+            bodies = [{"instances": [{"prompt": prompt}], "parameters": {"sampleCount": 1, "aspectRatio": "16:9"}}]
+            url = f"{base}:predict?key={key}"
+        for body in bodies:
+            try:
+                r = requests.post(url, json=body, timeout=120)
+                if r.status_code == 429:
+                    time.sleep(20)
+                    r = requests.post(url, json=body, timeout=120)
+                if r.status_code == 200:
+                    img = _extract_b64_image(r.json())
+                    if img:
+                        dest.write_bytes(img)
+                        GEMINI_IMG["fails"] = 0
+                        time.sleep(4)  # stay under free-tier rate limits
+                        return True
+                    print(f"  Gemini image {name}: no image in reply")
+                else:
+                    print(f"  Gemini image {name} -> {r.status_code}: {r.text[:140]}")
+                    if r.status_code != 400:
+                        break  # try the next model; 400 = try the simpler request body
+            except Exception as e:
+                print(f"  Gemini image {name} error: {e}")
+                break
+    GEMINI_IMG["fails"] += 1
+    if GEMINI_IMG["fails"] >= 3:
+        GEMINI_IMG["off"] = True
+        print("  Gemini image: switched off (no quota or not supported) -> using fallback generator")
+    return False
+
+
+LOCAL = {"pipe": None, "off": False}
+
+
+def src_local(prompt, dest):
+    """Draws the image on the GitHub runner itself (LCM-Dreamshaper on CPU).
+    No quota, no outside service: slower and lower resolution, but unlimited."""
+    if LOCAL["off"]:
+        return False
+    try:
+        if LOCAL["pipe"] is None:
+            print("  loading local image model (first time downloads a few GB)...")
+            import torch
+            from diffusers import DiffusionPipeline
+            torch.set_num_threads(os.cpu_count() or 4)
+            pipe = DiffusionPipeline.from_pretrained("SimianLuo/LCM_Dreamshaper_v7")
+            pipe.set_progress_bar_config(disable=True)
+            LOCAL["pipe"] = pipe
+        img = LOCAL["pipe"](prompt=prompt, num_inference_steps=4, guidance_scale=8.0,
+                            width=768, height=432).images[0]
+        img = img.convert("RGB").resize((W, H))
+        img.save(dest, quality=93)
+        return True
+    except Exception as e:
+        print("  local image model unavailable:", repr(e)[:200])
+        LOCAL["off"] = True
+        return False
+
+
+def ai_image(prompt, dest, used, patient):
+    """Returns the name of the engine that made the image, or None."""
+    m = ENGINE["mode"]
+    if m == "local":
+        if src_local(prompt, dest):
+            return "local"
+        return "pollinations" if src_ai(prompt, dest, used, patient=patient) else None
+    if m == "gemini":
+        if src_gemini_image(prompt, dest):
+            return "gemini-image"
+        return "pollinations" if src_ai(prompt, dest, used, patient=patient) else None
+    if m == "pollinations":
+        return "pollinations" if src_ai(prompt, dest, used, patient=patient) else None
+    # auto: free online generator first, the local model as the unlimited backup
+    if src_ai(prompt, dest, used, patient=False):
+        return "pollinations"
+    return "local" if src_local(prompt, dest) else None
 
 
 def get_image(i, s, dest, used, mode, st, character):
@@ -355,8 +524,12 @@ def get_image(i, s, dest, used, mode, st, character):
         order = ([("ai", None)] + photo) if i % 2 == 0 else (photo + [("ai", None)])
     for name, fn in order:
         try:
-            ok = (src_ai(full_prompt(s, st, character), dest, used, patient=(mode == "ai_only"))
-                  if name == "ai" else fn(q, dest, used))
+            if name == "ai":
+                got = ai_image(full_prompt(s, st, character), dest, used, patient=(mode == "ai_only"))
+                if got:
+                    return got
+                continue
+            ok = fn(q, dest, used)
         except Exception as e:
             print(f"  {name} error: {e}")
             ok = False
@@ -587,11 +760,15 @@ def main():
     ap.add_argument("--images", default="auto", choices=["auto", "mix", "ai", "photos"])
     ap.add_argument("--text", default="auto", choices=["auto", "off", "keywords", "cards", "both"])
     ap.add_argument("--clips", type=int, default=0, help="experimental: number of archive.org film clips")
+    ap.add_argument("--ai-engine", default="auto", choices=["auto", "local", "pollinations", "gemini"],
+                    help="auto = Pollinations, then the local model; local = unlimited, runs on the runner")
+    ap.add_argument("--look", default="", help="your own description of the visual world/atmosphere")
     ap.add_argument("--music", default="music.mp3")
     ap.add_argument("--out", default="output")
     args = ap.parse_args()
 
     st = STYLES[args.style]
+    ENGINE["mode"], ENGINE["look"] = args.ai_engine, args.look
     voice = st["voice"] if args.voice == "auto" else args.voice
     mode = st["mode"] if args.images == "auto" else args.images
     if st["mode"] == "ai_only" and args.images == "auto":
