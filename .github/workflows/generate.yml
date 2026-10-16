@@ -20,6 +20,11 @@ on:
           - anime
           - pixel-art
           - 3d-cartoon
+      look:
+        description: "Optional: describe the visual world/atmosphere you want (English)"
+        required: false
+        default: ""
+        type: string
       minutes:
         description: "Length in minutes"
         required: true
@@ -37,6 +42,12 @@ on:
         default: "auto"
         type: choice
         options: [auto, mix, ai, photos]
+      ai_engine:
+        description: "Who draws images: auto (online, then local backup), local (unlimited, slower), pollinations, gemini"
+        required: true
+        default: "auto"
+        type: choice
+        options: [auto, local, pollinations, gemini]
       voice:
         description: "TTS voice (auto = style default)"
         required: true
@@ -68,6 +79,19 @@ jobs:
           sudo apt-get install -y ffmpeg jq fonts-dejavu-core
           pip install -r requirements.txt
 
+      - name: Cache local image model
+        if: ${{ inputs.ai_engine == 'auto' || inputs.ai_engine == 'local' }}
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-lcm-dreamshaper-v1
+
+      - name: Install local image model (CPU)
+        if: ${{ inputs.ai_engine == 'auto' || inputs.ai_engine == 'local' }}
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install diffusers transformers accelerate safetensors pillow
+
       - name: Generate video
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -80,9 +104,12 @@ jobs:
           IMAGES: ${{ inputs.images }}
           VOICE: ${{ inputs.voice }}
           CLIPS: ${{ inputs.clips }}
+          LOOK: ${{ inputs.look }}
+          ENGINE: ${{ inputs.ai_engine }}
         run: |
           python generate_video.py "$TOPIC" --style "$STYLE" --minutes "$MINUTES" \
-            --text "$TEXTMODE" --images "$IMAGES" --voice "$VOICE" --clips "$CLIPS"
+            --text "$TEXTMODE" --images "$IMAGES" --voice "$VOICE" --clips "$CLIPS" \
+            --look "$LOOK" --ai-engine "$ENGINE"
 
       - name: Publish as release
         env:
