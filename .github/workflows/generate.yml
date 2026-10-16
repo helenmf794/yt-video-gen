@@ -7,22 +7,46 @@ on:
         description: "Video topic (English)"
         required: true
         type: string
+      style:
+        description: "Visual style"
+        required: true
+        default: "documentary"
+        type: choice
+        options:
+          - documentary
+          - stickman
+          - whiteboard
+          - cartoon-kids
+          - anime
+          - pixel-art
+          - 3d-cartoon
       minutes:
         description: "Length in minutes"
         required: true
         default: "10"
         type: string
-      voice:
-        description: "TTS voice"
+      text:
+        description: "On-screen text: auto, off, keywords, cards, both"
         required: true
-        default: "en-US-AndrewNeural"
-        type: string
-      images:
-        description: "Images: mix (AI + real photos), ai, or photos"
-        required: true
-        default: "mix"
+        default: "auto"
         type: choice
-        options: [mix, ai, photos]
+        options: [auto, off, keywords, cards, both]
+      images:
+        description: "Images: auto (per style), mix, ai, photos"
+        required: true
+        default: "auto"
+        type: choice
+        options: [auto, mix, ai, photos]
+      voice:
+        description: "TTS voice (auto = style default)"
+        required: true
+        default: "auto"
+        type: string
+      clips:
+        description: "Experimental: number of old film clips from archive.org (0 = none)"
+        required: true
+        default: "0"
+        type: string
 
 permissions:
   contents: write
@@ -30,7 +54,7 @@ permissions:
 jobs:
   render:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
 
@@ -50,10 +74,15 @@ jobs:
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           TOPIC: ${{ inputs.topic }}
+          STYLE: ${{ inputs.style }}
           MINUTES: ${{ inputs.minutes }}
-          VOICE: ${{ inputs.voice }}
+          TEXTMODE: ${{ inputs.text }}
           IMAGES: ${{ inputs.images }}
-        run: python generate_video.py "$TOPIC" --minutes "$MINUTES" --voice "$VOICE" --images "$IMAGES"
+          VOICE: ${{ inputs.voice }}
+          CLIPS: ${{ inputs.clips }}
+        run: |
+          python generate_video.py "$TOPIC" --style "$STYLE" --minutes "$MINUTES" \
+            --text "$TEXTMODE" --images "$IMAGES" --voice "$VOICE" --clips "$CLIPS"
 
       - name: Publish as release
         env:
@@ -62,6 +91,6 @@ jobs:
           DIR=$(find output -mindepth 1 -maxdepth 1 -type d | head -n 1)
           TITLE=$(jq -r .title "$DIR/metadata.json")
           gh release create "video-${{ github.run_id }}" \
-            "$DIR/video.mp4" "$DIR/metadata.json" \
+            "$DIR/video.mp4" "$DIR/metadata.json" "$DIR/subs.srt" \
             --title "$TITLE" \
-            --notes "Topic: ${{ inputs.topic }}"
+            --notes "Topic: ${{ inputs.topic }} | Style: ${{ inputs.style }}"
